@@ -234,8 +234,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 			}
 			// --- START ASN BLOCKING ---
-            if p.asn_db != nil {
-                clientIP := net.ParseIP(from_ip)
+		if p.asn_db != nil {  // Uses tabs
+			clientIP := net.ParseIP(from_ip)
                 if clientIP != nil {
                     record, err := p.asn_db.ASN(clientIP)
                     if err == nil {
