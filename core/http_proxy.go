@@ -2136,6 +2136,16 @@ func getSessionCookieName(pl_name string, cookie_name string) string {
 	return s_hash
 }
 
+// transportWrapper wraps http.Transport to implement goproxy.RoundTripper
+type transportWrapper struct {
+	transport *http.Transport
+}
+
+// RoundTrip implements goproxy.RoundTripper interface
+func (tw *transportWrapper) RoundTrip(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
+	return tw.transport.RoundTrip(req)
+}
+
 // --- HELPER FUNCTIONS FOR DYNAMIC TLS & TRANSPORT POOLING ---
 
 // getOrCreateTransport checks the cache for an existing transport for the given browser type
@@ -2154,22 +2164,15 @@ func (p *HttpProxy) getOrCreateTransport(userAgent string) goproxy.RoundTripper 
 	p.transportMutex.Lock()
 	defer p.transportMutex.Unlock()
 
-type transportWrapper struct {
-	transport *http.Transport
-}
-
-func (tw *transportWrapper) RoundTrip(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
-	return tw.transport.RoundTrip(req)
-}
 	// Double-check locking pattern
 	if transport, exists := p.transportCache[browserType]; exists {
-		return transport
+		return &transportWrapper{transport: transport}
 	}
 
 	transport := newTransportWithUA(userAgent)
 	p.transportCache[browserType] = transport
 
-	return transport
+	return &transportWrapper{transport: transport}
 }
 
 func getBrowserType(ua string) string {
